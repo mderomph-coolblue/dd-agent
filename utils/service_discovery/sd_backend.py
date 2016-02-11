@@ -41,8 +41,8 @@ class ServiceDiscoveryBackend(object):
 
     def _render_template(self, init_config_tpl, instance_tpl, variables):
         """Replace placeholders in a template with the proper values.
-           Return a list made of `init_config` and `instances`."""
-        config = [init_config_tpl, instance_tpl]
+           Return a tuple made of `init_config` and `instances`."""
+        config = (init_config_tpl, instance_tpl)
         for tpl in config:
             for key in tpl:
                 for var in self.PLACEHOLDER_REGEX.findall(str(tpl[key])):
@@ -52,7 +52,6 @@ class ServiceDiscoveryBackend(object):
                         log.warning('Failed to find interpolate variable {0} for the {1} parameter.'
                                     ' The check might not be configured properly.'.format(var, key))
                         tpl[key].replace(var, '')
-        config[1] = config[1]
         return config
 
     @classmethod
@@ -77,7 +76,7 @@ class SDDockerBackend(ServiceDiscoveryBackend):
 
         self.VAR_MAPPING = {
             'host': self._get_host,
-            'port': self._get_port,
+            'port': self._get_ports,
             'tags': self._get_tags,
         }
         ServiceDiscoveryBackend.__init__(self, agentConfig)
@@ -105,24 +104,22 @@ class SDDockerBackend(ServiceDiscoveryBackend):
 
         return ip_addr
 
-    def _get_port(self, container_inspect):
-        """Extract the port from a docker inspect object."""
+    def _get_ports(self, container_inspect):
+        """Extract a list of available ports from a docker inspect object. Sort them numerically."""
         c_id = container_inspect.get('Id', '')
         try:
-            port = container_inspect['NetworkSettings']['Ports'].keys()[0].split("/")[0]
+            ports = map(lambda x: x.split('/')[0], container_inspect['NetworkSettings']['Ports'].keys())
         except (IndexError, KeyError, AttributeError):
-            log.debug("Didn't find the port for container %s (%s), using the kubernetes way." %
+            log.debug("Didn't find the port for container %s (%s), trying the kubernetes way." %
                       (c_id, container_inspect.get('Config', {}).get('Image', '')))
             # kubernetes case
             # first we try to get it from the docker API
             # it works if the image has an EXPOSE instruction
-            ports = container_inspect['Config'].get('ExposedPorts', {})
-            if ports:
-                port = ports.keys()[0].split("/")[0]
-            # if it fails, try with the kubernetes API
-            else:
+            ports = map(lambda x: x.split('/')[0], container_inspect['Config'].get('ExposedPorts', {}).keys())
+            # if it failed, try with the kubernetes API
+            if not ports:
                 co_statuses = self._get_kube_config(c_id, 'status').get('containerStatuses', [])
-                port, c_name = None, None
+                c_name = None
                 for co in co_statuses:
                     if co.get('containerID', '').split('//')[-1] == c_id:
                         c_name = co.get('name')
@@ -130,10 +127,9 @@ class SDDockerBackend(ServiceDiscoveryBackend):
                 containers = self._get_kube_config(c_id, 'spec').get('containers', [])
                 for co in containers:
                     if co.get('name') == c_name:
-                        ports = map(lambda x: x.get('containerPort'), co.get('ports', []))
-                        # TODO: choose the port in a smarter way (over multiple check runs maybe)
-                        port = str(ports[0])
-        return port
+                        ports = map(lambda x: str(x.get('containerPort')), co.get('ports', []))
+        ports = sorted(ports, key=lambda x: int(x))
+        return ports
 
     def _get_tags(self, container_inspect):
         """Extract useful tags from docker or platform APIs."""
@@ -218,9 +214,19 @@ class SDDockerBackend(ServiceDiscoveryBackend):
         check_name, init_config_tpl, instance_tpl, variables = template_config
         var_values = {}
         for v in variables:
-            if v in self.VAR_MAPPING:
+            # variables can be suffixed with an index in case a list is found
+            var_parts = v.split('_')
+            if var_parts[0] in self.VAR_MAPPING:
                 try:
-                    var_values[v] = self.VAR_MAPPING[v](inspect)
+                    res = self.VAR_MAPPING[var_parts[0]](inspect)
+                    # if an index is found in the variable, use it to select a value
+                    if len(var_parts) > 1 and isinstance(res, list) and int(var_parts[-1]) <= len(res):
+                        var_values[v] = res[int(var_parts[-1])]
+                    # if no valid index was found but we have a list, return the last element
+                    elif isinstance(res, list):
+                        var_values[v] = res[-1]
+                    else:
+                        var_values[v] = res
                 except Exception as ex:
                     log.error("Could not find a value for the template variable %s: %s", (v, ex))
             else:
