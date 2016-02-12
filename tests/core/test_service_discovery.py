@@ -78,8 +78,8 @@ class TestServiceDiscovery(unittest.TestCase):
     }
     container_inspects = [
         # (inspect_dict, expected_ip, expected_port)
-        (docker_container_inspect, '172.17.0.21', '443'),
-        (kubernetes_container_inspect, '127.0.0.1', '6379'),  # arbitrarily defined in the mocked pod_list
+        (docker_container_inspect, '172.17.0.21', ['80', '443']),
+        (kubernetes_container_inspect, '127.0.0.1', ['6379']),  # arbitrarily defined in the mocked pod_list
         (malformed_container_inspect, None, exceptions.KeyError)
     ]
 
@@ -150,15 +150,15 @@ class TestServiceDiscovery(unittest.TestCase):
                         self.assertEqual(sd_backend._get_host(c_ins), expected_ip)
                         clear_singletons(sd_backend)
 
-    def test_get_port(self):
+    def test_get_ports(self):
         with mock.patch('utils.service_discovery.sd_backend.get_docker_client', return_value=None):
-            for c_ins, _, expected_port in self.container_inspects:
+            for c_ins, _, expected_ports in self.container_inspects:
                 sd_backend = ServiceDiscoveryBackend(agentConfig=self.auto_conf_agentConfig)
-                if isinstance(expected_port, str):
-                    self.assertEqual(sd_backend._get_port(c_ins), expected_port)
+                if isinstance(expected_ports, list):
+                    self.assertEqual(sd_backend._get_ports(c_ins), expected_ports)
                 else:
-                    with self.assertRaises(expected_port):
-                        sd_backend._get_port(c_ins)
+                    with self.assertRaises(expected_ports):
+                        sd_backend._get_ports(c_ins)
                 clear_singletons(sd_backend)
 
     @mock.patch('docker.Client.inspect_container', side_effect=_get_container_inspect)
@@ -166,7 +166,7 @@ class TestServiceDiscovery(unittest.TestCase):
     def test_get_check_config(self, mock_inspect_container, mock_get_tpl_conf):
         """Test get_check_config with mocked container inspect and config template"""
         with mock.patch.object(SDDockerBackend, '_get_host', return_value='127.0.0.1'):
-            with mock.patch.object(SDDockerBackend, '_get_port', return_value='1337'):
+            with mock.patch.object(SDDockerBackend, '_get_ports', return_value=['1337']):
                 c_id = self.docker_container_inspect.get('Id')
                 for image in self.mock_templates.keys():
                     sd_backend = ServiceDiscoveryBackend(agentConfig=self.auto_conf_agentConfig)
